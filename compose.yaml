@@ -1,0 +1,100 @@
+# Help Desk RAG。設定一律來自根目錄的 .env（從 .env.example 複製）。
+# 這個 compose 專案自帶 postgres 與 qdrant，資料放在本專案的具名 volume，網路是本專案自己的
+# helpdesk_default。postgres 與 qdrant 不對主機開 port，只有 helpdesk-api 開在 127.0.0.1:8140。
+name: helpdesk
+
+x-helpdesk: &helpdesk
+  image: helpdesk/helpdesk:local
+  init: true
+  env_file:
+    - path: .env
+      required: true
+  environment:
+    DOCUMENTS_ROOT: /data/documents
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.3-unprivileged@sha256:affb67e1d6f2f93d7d20b90d238a7d4b974d36351c162e73bda794e4b2e03483
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY in .env}
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # 映像裡沒有 curl 與 wget，用 bash 的 /dev/tcp 打 /readyz。這個端點不需要 API 金鑰。
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ $$status == *' 200 '* ]]"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *helpdesk
+    build:
+      context: .
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  helpdesk-api:
+    <<: *helpdesk
+    command: ["helpdesk-api", "--host", "0.0.0.0", "--port", "8140"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8140:8140"
+    volumes:
+      # 與 ingestion-worker 共用 E5 model 快取，不重複下載。
+      - hf-model-cache:/var/cache/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8140/health/ready', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+
+  ingestion-worker:
+    <<: *helpdesk
+    command: ["helpdesk-worker", "run"]
+    restart: unless-stopped
+    volumes:
+      - ./documents:/data/documents:ro
+      - hf-model-cache:/var/cache/huggingface
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  hf-model-cache:

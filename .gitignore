@@ -1,0 +1,52 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!.env.e2e.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User documents are data, not source
+**/documents/*
+!**/documents/.gitkeep
+
+# Python and tooling
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage*
+coverage.xml
+htmlcov/
+.uv-cache/
+dist/
+build/
+
+# Local development notes and evaluation, kept out of the repository
+docs/
+eval/
+
+# Runtime artifacts
+*.log
+*.log.*
+.chat-e2e.lock
+model-cache/
+backups/
+*.dump
+
+# Editors and OS
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
