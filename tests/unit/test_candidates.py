@@ -8,7 +8,7 @@ from datetime import date
 import pytest
 
 from helpdesk.application.retrieval.access import AccessPolicy, AclAccess, OpenAccess
-from helpdesk.application.retrieval.candidates import CandidatePool, FindCandidates
+from helpdesk.application.retrieval.candidates import CandidatePool, FindCandidates, merge_pools
 from helpdesk.application.retrieval.ports import StoredChunk
 from helpdesk.domain.access import AccessRule, PermissionEffect, Principal, PrincipalType
 from helpdesk.domain.documents import ChunkId, DocumentStatus
@@ -175,3 +175,29 @@ async def test_the_standalone_question_is_what_gets_embedded_and_searched() -> N
 
     assert embedder.queries == ["報名時間"]
     assert [term.text for term in keywords.queries[0].terms] == ["報名時間", "報名", "名時", "時間"]
+
+
+async def test_merging_keeps_the_top_results_of_every_search_text() -> None:
+    own_topic, shared, previous_topic = stored(), stored(), stored()
+    question_alone = await find([own_topic, shared])
+    with_history = await find([previous_topic, shared])
+
+    merged = merge_pools([question_alone, with_history], limit=24)
+
+    assert order(merged) == [shared.chunk.id, own_topic.chunk.id, previous_topic.chunk.id]
+    assert merged.candidates[0].fused_score == pytest.approx((1 / 62 + 1 / 62) / (2 / 61))
+    assert set(merged.chunks) == {own_topic.chunk.id, shared.chunk.id, previous_topic.chunk.id}
+
+
+async def test_merging_one_search_text_changes_nothing() -> None:
+    pool = await find([stored(), stored()])
+
+    assert merge_pools([pool], limit=1) is pool
+
+
+async def test_a_keyword_failure_in_any_search_text_is_reported() -> None:
+    a = stored()
+    healthy = await find([a])
+    failed = await find([a], [a], keyword_error=RuntimeError("down"))
+
+    assert merge_pools([healthy, failed], limit=8).keyword_failure == "RuntimeError"

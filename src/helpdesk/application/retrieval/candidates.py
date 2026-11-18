@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from helpdesk.application.retrieval.keywords import keyword_query
@@ -132,6 +132,31 @@ class FindCandidates:
                 break
             page_size = min(page_size * 2, MAX_SEARCH_CANDIDATES - offset)
         return kept[:target]
+
+
+def merge_pools(pools: Sequence[CandidatePool], limit: int) -> CandidatePool:
+    """把幾段檢索文字各自的候選再做一次 RRF。同一個 chunk 保留第一次出現時的分數明細。"""
+
+    if len(pools) == 1:
+        return pools[0]
+    fused: dict[ChunkId, float] = {}
+    first_seen: dict[ChunkId, Candidate] = {}
+    for pool in pools:
+        for rank, candidate in enumerate(pool.candidates, start=1):
+            fused[candidate.chunk_id] = fused.get(candidate.chunk_id, 0.0) + 1.0 / (RRF_K + rank)
+            first_seen.setdefault(candidate.chunk_id, candidate)
+    best_possible = len(pools) / (RRF_K + 1)
+    ordered = sorted(fused, key=lambda chunk_id: -fused[chunk_id])[:limit]
+    return CandidatePool(
+        candidates=tuple(
+            replace(first_seen[chunk_id], fused_score=fused[chunk_id] / best_possible)
+            for chunk_id in ordered
+        ),
+        chunks={chunk_id: stored for pool in pools for chunk_id, stored in pool.chunks.items()},
+        keyword_failure=next(
+            (pool.keyword_failure for pool in pools if pool.keyword_failure), None
+        ),
+    )
 
 
 def fuse(rankings: Sequence[Ranking], limit: int) -> tuple[Candidate, ...]:

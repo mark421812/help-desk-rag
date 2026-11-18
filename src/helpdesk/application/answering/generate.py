@@ -8,6 +8,7 @@ root 依 `SENSITIVE_DATA_SCAN_ENABLED` 注入，這裡不判斷開關。
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -27,6 +28,7 @@ from helpdesk.application.llm import (
     prompt_bytes,
 )
 from helpdesk.application.outbound_scan import OutboundScan
+from helpdesk.application.retrieval.understanding import HistoryMessage
 from helpdesk.domain.answers import Answer, AnswerPart, AnswerStatus
 from helpdesk.domain.conversations import TurnOutcome, TurnResult
 from helpdesk.domain.errors import DomainError, DomainValidationError
@@ -34,6 +36,10 @@ from helpdesk.domain.retrieval import Evidence, EvidenceSet, QueryPlan
 
 MAX_ANSWER_CHARACTERS: Final = 20_000
 INVALID_ANSWER: Final = "invalid_answer"
+# 模型偶爾把 prompt 內的引用代號寫進文字，例如「（C4, C8）」；引用另外顯示，代號對使用者沒有意義。
+_INLINE_CITATION_LABELS: Final = re.compile(
+    r"\s*[(\uff08\[【]\s*C\d+(?:\s*[,\uff0c、;\uff1b]\s*C\d+)*\s*[)\uff09\]】]"
+)
 
 
 class PromptTooLargeError(DomainError):
@@ -77,16 +83,18 @@ class GenerateAnswer:
         self._scan = scan
         self._limits = limits
 
-    async def run(self, plan: QueryPlan, evidence: EvidenceSet) -> Generation:
+    async def run(
+        self, plan: QueryPlan, evidence: EvidenceSet, history: Sequence[HistoryMessage] = ()
+    ) -> Generation:
         """回答 `plan.standalone_question`。前提是 `settle_without_model(evidence)` 為 None。"""
 
         sendable = evidence.sendable
-        verdict = self._scan.scan(outbound_texts(plan, sendable))
+        verdict = self._scan.scan(outbound_texts(plan, sendable, history))
         if not verdict.allowed:
             return Generation(
                 TurnResult(TurnOutcome.OUTBOUND_POLICY_BLOCKED), scan_rules=verdict.rule_ids
             )
-        messages = answer_messages(plan.standalone_question, plan.language, sendable)
+        messages = answer_messages(plan.standalone_question, plan.language, sendable, history)
         if prompt_bytes(messages) > self._limits.max_prompt_bytes:
             raise PromptTooLargeError("the answer prompt exceeds MAX_PROMPT_TOKENS")
         response = await self._provider.complete(
@@ -103,10 +111,13 @@ class GenerateAnswer:
         )
 
 
-def outbound_texts(plan: QueryPlan, evidence: Sequence[Evidence]) -> list[str]:
-    """即將送出的每一段文字：問題、語言，以及每段證據的內容、類型、標題與章節。"""
+def outbound_texts(
+    plan: QueryPlan, evidence: Sequence[Evidence], history: Sequence[HistoryMessage] = ()
+) -> list[str]:
+    """即將送出的每一段文字：問題、語言、前文，以及每段證據的內容、類型、標題與章節。"""
 
     texts = [plan.standalone_question, *([plan.language] if plan.language else [])]
+    texts.extend(message.text for message in history)
     for item in evidence:
         texts.extend((item.content, item.document_type, item.citation.title))
         if item.citation.section_path is not None:
@@ -148,7 +159,9 @@ def parse_answer(response: LlmResponse, evidence: Sequence[Evidence]) -> Answer:
             raise _invalid("citation ids must be strings")
         if any(label not in by_label for label in labels):
             raise _invalid("the answer cites an unknown citation id")
-        parsed.append((text, labels))
+        text = _INLINE_CITATION_LABELS.sub("", text).strip()
+        if text:
+            parsed.append((text, labels))
     try:
         parts = tuple(
             AnswerPart(

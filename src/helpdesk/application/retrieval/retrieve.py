@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 
 from helpdesk.application.retrieval.access import AccessPolicy
 from helpdesk.application.retrieval.assembly import AssemblyLimits, assemble
-from helpdesk.application.retrieval.candidates import FindCandidates
+from helpdesk.application.retrieval.candidates import FindCandidates, merge_pools
 from helpdesk.application.retrieval.ports import StoredChunk
 from helpdesk.application.retrieval.understanding import (
     HistoryMessage,
@@ -67,12 +68,14 @@ class RetrieveEvidence:
         def admit(stored: StoredChunk) -> bool:
             return self._access.admits(stored, principal, today)
 
-        pool = await self._candidates.run(
-            understanding.plan.standalone_question,
-            scope=self._access.vector_scope(principal),
-            admit=admit,
-            limit=self._candidate_count,
+        scope = self._access.vector_scope(principal)
+        pools = await asyncio.gather(
+            *(
+                self._candidates.run(text, scope=scope, admit=admit, limit=self._candidate_count)
+                for text in understanding.search_texts
+            )
         )
+        pool = merge_pools(pools, self._candidate_count)
         evidence = assemble(pool.candidates, pool.chunks, self._access.sendable, self._limits)
         return Retrieval(
             understanding=understanding,

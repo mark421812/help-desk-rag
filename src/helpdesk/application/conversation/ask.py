@@ -240,7 +240,9 @@ class ProcessTurn:
         if not await self._move(report, report.turn.start_generating()):
             return
         try:
-            generation = await self._generate.run(understanding.plan, evidence)
+            generation = await self._generate.run(
+                understanding.plan, evidence, understanding.history
+            )
         except Exception as error:
             code = error.error_code if isinstance(error, LlmError) else None
             report.error_type = code or type(error).__name__

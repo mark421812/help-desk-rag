@@ -42,7 +42,7 @@ class QueryPlan:
     """理解問題的結果。
 
     追問會被改寫成不依賴前文的 `standalone_question`；不需要改寫或改寫失敗時，它就等於
-    `original_question`。檢索只用 `standalone_question`。
+    `original_question`。
     """
 
     original_question: str

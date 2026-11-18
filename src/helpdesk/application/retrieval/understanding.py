@@ -83,6 +83,19 @@ class RewriteOutcome(StrEnum):
     INVALID_OUTPUT = "invalid_output"
 
 
+# 有前文、但沒拿到可用的改寫時，檢索改用上一個提問加這次的問題，追問才不會失去主題。
+FALLS_BACK_TO_HISTORY: Final = frozenset(
+    {
+        RewriteOutcome.SCAN_BLOCKED,
+        RewriteOutcome.PROMPT_TOO_LARGE,
+        RewriteOutcome.TIMEOUT,
+        RewriteOutcome.RATE_LIMITED,
+        RewriteOutcome.PROVIDER_ERROR,
+        RewriteOutcome.INVALID_OUTPUT,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryMessage:
     role: Literal["user", "assistant"]
@@ -91,10 +104,23 @@ class HistoryMessage:
 
 @dataclass(frozen=True, slots=True)
 class Understanding:
+    """`history` 是截短後的前文，回答時一併附上。`search_context` 只在改寫失敗時有值。"""
+
     plan: QueryPlan
     rewrite: RewriteOutcome
     detail: str | None = None
     usage: TokenUsage | None = None
+    history: tuple[HistoryMessage, ...] = ()
+    search_context: str | None = None
+
+    @property
+    def search_texts(self) -> tuple[str, ...]:
+        """檢索要搜的文字。改寫失敗時問題本身也單獨搜一次，換了話題才不會被前文蓋過。"""
+
+        question = self.plan.standalone_question
+        if not self.search_context:
+            return (question,)
+        return (question, f"{self.search_context}\n{question}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +165,12 @@ class UnderstandQuestion:
         self, question: str, language: str | None, history: Sequence[HistoryMessage]
     ) -> Understanding:
         original = normalize_question(question)
+        bounded = bound_history(
+            history,
+            max_messages=self._limits.history_turns * 2,
+            max_chars=self._limits.turn_max_chars,
+        )
+        last_question = next((m.text for m in reversed(bounded) if m.role == "user"), None)
 
         def understood(
             outcome: RewriteOutcome,
@@ -147,13 +179,15 @@ class UnderstandQuestion:
             detail: str | None = None,
             usage: TokenUsage | None = None,
         ) -> Understanding:
-            return Understanding(QueryPlan(original, standalone, language), outcome, detail, usage)
+            return Understanding(
+                QueryPlan(original, standalone, language),
+                outcome,
+                detail,
+                usage,
+                history=bounded,
+                search_context=last_question if outcome in FALLS_BACK_TO_HISTORY else None,
+            )
 
-        bounded = bound_history(
-            history,
-            max_messages=self._limits.history_turns * 2,
-            max_chars=self._limits.turn_max_chars,
-        )
         if not bounded:
             return understood(RewriteOutcome.NO_HISTORY)
         if len(original) > REWRITE_MAX_QUESTION_CHARS:

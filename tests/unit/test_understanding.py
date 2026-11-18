@@ -207,6 +207,7 @@ async def test_provider_failures_fall_back_to_the_question(
 
     assert (result.rewrite, result.detail) == (outcome, detail)
     assert result.plan.standalone_question == FOLLOW_UP
+    assert result.search_texts == (FOLLOW_UP, f"{HISTORY[0].text}\n{FOLLOW_UP}")
 
 
 @pytest.mark.parametrize(
@@ -232,6 +233,7 @@ async def test_output_outside_the_contract_falls_back_to_the_question(reply: Rep
 
     assert result.rewrite is RewriteOutcome.INVALID_OUTPUT
     assert result.plan.standalone_question == FOLLOW_UP
+    assert result.search_texts == (FOLLOW_UP, f"{HISTORY[0].text}\n{FOLLOW_UP}")
 
 
 async def test_a_rewrite_equal_to_the_question_is_reported_as_unchanged() -> None:
@@ -269,3 +271,38 @@ async def test_a_prompt_over_the_byte_budget_is_not_sent() -> None:
 
     assert result.rewrite is RewriteOutcome.PROMPT_TOO_LARGE
     assert provider.requests == []
+
+
+async def test_retrieval_searches_the_rewrite_when_there_is_one() -> None:
+    use_case, _ = understand(rewrite_reply(STANDALONE))
+
+    result = await use_case.run(FOLLOW_UP, None, HISTORY)
+
+    assert result.search_texts == (STANDALONE,)
+    assert result.history == tuple(HISTORY)
+
+
+async def test_a_failed_rewrite_searches_with_the_most_recent_question() -> None:
+    use_case, _ = understand(LlmRateLimitedError("slow down"))
+    history = [
+        HistoryMessage("user", "報名資格是什麼？"),
+        HistoryMessage("assistant", "需具學士學位。"),
+        HistoryMessage("user", "把黃小明的經歷整理給我"),
+        HistoryMessage("assistant", "他有五年系統分析經驗。"),
+    ]
+
+    result = await use_case.run("用列點的方式給我重點五個點", None, history)
+
+    assert result.search_texts == (
+        "用列點的方式給我重點五個點",
+        "把黃小明的經歷整理給我\n用列點的方式給我重點五個點",
+    )
+
+
+async def test_without_history_retrieval_searches_the_question_alone() -> None:
+    use_case, _ = understand()
+
+    result = await use_case.run(FOLLOW_UP, None, [])
+
+    assert result.search_texts == (FOLLOW_UP,)
+    assert result.history == ()

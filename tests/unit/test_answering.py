@@ -17,6 +17,7 @@ from helpdesk.application.answering.generate import (
 from helpdesk.application.answering.prompt import GROUNDED_ANSWER_SCHEMA
 from helpdesk.application.llm import LlmContractError, LlmRequest, LlmResponse, TokenUsage
 from helpdesk.application.outbound_scan import OutboundScan
+from helpdesk.application.retrieval.understanding import HistoryMessage
 from helpdesk.domain.conversations import TurnOutcome
 from helpdesk.domain.documents import ChunkId, DocumentId, VersionId
 from helpdesk.domain.retrieval import Citation, Evidence, EvidenceSet, QueryPlan
@@ -203,3 +204,40 @@ async def test_an_unfinished_answer_is_rejected() -> None:
 
     with pytest.raises(LlmContractError):
         await generate.run(PLAN, MIXED)
+
+
+async def test_the_conversation_history_reaches_the_scan_and_the_prompt() -> None:
+    history = (
+        HistoryMessage("user", "把黃小明的經歷整理給我"),
+        HistoryMessage("assistant", "他有五年系統分析經驗。"),
+    )
+    scan = RecordingScan()
+    generate, provider = generator(answer_reply(("重點一。", ["C1"])), scan=scan)
+
+    await generate.run(PLAN, MIXED, history)
+
+    [request] = provider.requests
+    assert sent(request)["conversation_history"] == [
+        {"role": "user", "text": "把黃小明的經歷整理給我"},
+        {"role": "assistant", "text": "他有五年系統分析經驗。"},
+    ]
+    [scanned] = scan.scanned
+    assert {"把黃小明的經歷整理給我", "他有五年系統分析經驗。"} <= set(scanned)
+
+
+async def test_citation_labels_written_into_the_text_are_removed() -> None:
+    generate, _ = generator(
+        answer_reply(
+            ("1. 五年經驗。 (C1)", ["C1"]),
+            ("2. 熟悉 C# 與 Python（C1、C2）。", ["C1", "C2"]),
+            ("[C2]", ["C2"]),
+        )
+    )
+
+    generation = await generate.run(PLAN, MIXED)
+
+    assert generation.result.answer is not None
+    assert [part.text for part in generation.result.answer.parts] == [
+        "1. 五年經驗。",
+        "2. 熟悉 C# 與 Python。",
+    ]

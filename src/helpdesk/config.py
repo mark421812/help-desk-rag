@@ -21,6 +21,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # prompt、問題與 JSON 欄位的固定開銷，確保滿額證據不會被自己的 prompt 上限擋下。
 PROMPT_BYTES_PER_CONTEXT_TOKEN: Final = 6
 PROMPT_FIXED_OVERHEAD_BYTES: Final = 8_192
+PROMPT_BYTES_PER_HISTORY_CHAR: Final = 6
+PROMPT_OVERHEAD_BYTES_PER_HISTORY_MESSAGE: Final = 64
 
 
 class Settings(BaseSettings):
@@ -71,7 +73,7 @@ class Settings(BaseSettings):
     keyword_min_score: int = Field(default=3, ge=1)
     max_chunks_per_document: int = Field(default=6, ge=1)
     max_context_tokens: int = Field(default=6_000, ge=1, le=100_000)
-    max_prompt_tokens: int = Field(default=48_000, ge=1, le=1_000_000)
+    max_prompt_tokens: int = Field(default=64_000, ge=1, le=1_000_000)
 
     rewrite_history_turns: int = Field(default=3, ge=1, le=10)
     rewrite_turn_max_chars: int = Field(default=500, ge=1, le=2_000)
@@ -148,13 +150,24 @@ class Settings(BaseSettings):
             raise ValueError("CHUNK_OVERLAP_TOKENS must be smaller than CHUNK_TARGET_TOKENS")
         if self.chunk_max_tokens >= self.embedding_max_sequence_length:
             raise ValueError("CHUNK_MAX_TOKENS must leave room below the embedding sequence limit")
+        history_bytes = (
+            self.rewrite_history_turns
+            * 2
+            * (
+                self.rewrite_turn_max_chars * PROMPT_BYTES_PER_HISTORY_CHAR
+                + PROMPT_OVERHEAD_BYTES_PER_HISTORY_MESSAGE
+            )
+        )
         minimum_prompt_tokens = (
-            self.max_context_tokens * PROMPT_BYTES_PER_CONTEXT_TOKEN + PROMPT_FIXED_OVERHEAD_BYTES
+            self.max_context_tokens * PROMPT_BYTES_PER_CONTEXT_TOKEN
+            + history_bytes
+            + PROMPT_FIXED_OVERHEAD_BYTES
         )
         if self.max_prompt_tokens < minimum_prompt_tokens:
             raise ValueError(
                 f"MAX_PROMPT_TOKENS must be at least {minimum_prompt_tokens} so a full "
-                "MAX_CONTEXT_TOKENS evidence budget fits the byte-based prompt estimate"
+                "MAX_CONTEXT_TOKENS evidence budget and the conversation history fit the "
+                "byte-based prompt estimate"
             )
         if self.groq_connect_timeout_seconds > self.groq_total_timeout_seconds:
             raise ValueError("GROQ_CONNECT_TIMEOUT_SECONDS must not exceed the total timeout")

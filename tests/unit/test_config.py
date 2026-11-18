@@ -41,14 +41,20 @@ def test_a_local_env_file_can_turn_both_toggles_off(tmp_path: Path) -> None:
     assert settings.sensitive_data_scan_enabled is False
 
 
-def test_prompt_budget_must_fit_a_full_evidence_budget() -> None:
-    with pytest.raises(ValidationError, match="MAX_PROMPT_TOKENS"):
-        Settings(llm_provider="fake", max_context_tokens=6_000, max_prompt_tokens=12_000)
-    with pytest.raises(ValidationError, match="MAX_PROMPT_TOKENS"):
-        Settings(llm_provider="fake", max_context_tokens=6_000, max_prompt_tokens=44_191)
+def test_prompt_budget_must_fit_a_full_evidence_budget_and_the_history() -> None:
+    def settings(max_prompt_tokens: int) -> Settings:
+        return Settings(
+            llm_provider="fake",
+            max_context_tokens=6_000,
+            rewrite_history_turns=3,
+            rewrite_turn_max_chars=500,
+            max_prompt_tokens=max_prompt_tokens,
+        )
 
-    smallest = Settings(llm_provider="fake", max_context_tokens=6_000, max_prompt_tokens=44_192)
-    assert smallest.max_prompt_tokens == 44_192
+    for too_small in (12_000, 62_575):
+        with pytest.raises(ValidationError, match="MAX_PROMPT_TOKENS"):
+            settings(too_small)
+    assert settings(62_576).max_prompt_tokens == 62_576
 
 
 @pytest.mark.parametrize("key", [None, "", "   "])
